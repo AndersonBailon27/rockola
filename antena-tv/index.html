@@ -20,6 +20,7 @@
   --accent:#ff7a59;
   --accent-ink:#2a0f06;
   --warn:#ffc857;
+  --ok:#5fd38d;
   --display:"Bricolage Grotesque","Trebuchet MS",sans-serif;
   --body:"Figtree",system-ui,-apple-system,"Segoe UI",sans-serif;
 }
@@ -69,6 +70,8 @@ video{width:100%;height:100%;display:block;background:#000}
 .meta{min-width:0}
 .meta b{display:block;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .meta small{color:var(--muted);font-size:12px}
+.ch.ok .meta small::before{content:"● ";color:var(--ok)}
+.chk{display:flex;align-items:center;gap:6px;color:var(--muted);font-size:13px;flex:1 1 100%}
 .fav{background:none;border:0;font-size:20px;line-height:1;padding:8px;color:var(--line)}
 .fav[aria-pressed=true]{color:var(--warn)}
 .note{padding:18px 16px;color:var(--muted)}
@@ -111,6 +114,7 @@ dialog input[type=text],dialog input[type=url]{width:100%}
     <div class="tools">
       <input type="search" id="q" placeholder="Buscar canal" aria-label="Buscar canal">
       <select id="groupSel" aria-label="Categoría"></select>
+      <label class="chk" for="hideBad"><input type="checkbox" id="hideBad" checked> Ocultar canales caídos</label>
     </div>
     <div class="tabs" role="tablist">
       <button class="tab" role="tab" id="tabAll" aria-selected="true">Canales</button>
@@ -177,6 +181,8 @@ function parseM3U(text){
       while((m=re.exec(l)))a[m[1].toLowerCase()]=m[2];
       var rest=l.replace(/[\w-]+="[^"]*"/g,'');
       info={name:rest.slice(rest.indexOf(',')+1).trim()||a['tvg-name']||'Canal',logo:a['tvg-logo']||'',group:(a['group-title']||'').split(';')[0]||'Sin categoría'};
+    }else if(/^#(EXTVLCOPT|KODIPROP)/i.test(l)){
+      if(info)info.hdr=true; // pide cabeceras que un navegador no puede enviar
     }else if(l.charAt(0)!=='#'){
       if(/^(https?:)?\/\//i.test(l)){
         var c=info||{name:'Canal '+(out.length+1),logo:'',group:'Sin categoría'};
@@ -212,9 +218,11 @@ function loadList(id){
   channels=[];note('Cargando «'+L.name+'»…');
   var p=L.text?Promise.resolve(L.text):fetch(L.url).then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.text()});
   return p.then(function(t){
-    channels=parseM3U(t);
-    if(!channels.length)throw new Error('vacía');
-    fillGroups();shown=PAGE;render();
+    var all=parseM3U(t);
+    if(!all.length)throw new Error('vacía');
+    var secure=location.protocol==='https:';
+    channels=all.filter(function(c){return !c.hdr&&!(secure&&/^http:/i.test(c.url))});
+    fillGroups();shown=PAGE;render();runCheck();
   }).catch(function(){
     channels=[];fillGroups();
     note('No se pudo cargar «'+L.name+'». Revisa tu conexión o el enlace. Si el servidor de tu proveedor bloquea el acceso desde el navegador, descarga el archivo .m3u y súbelo con «Agregar lista».');
@@ -230,6 +238,35 @@ function fillGroups(){
   names.forEach(function(n){groupSel.appendChild(new Option(n+' ('+counts[n]+')',n))});
 }
 
+// Verificación en segundo plano: prueba cada canal y oculta los que no responden
+var st={},checkRun=0,checking=false,renderTimer=null;
+function later(){if(renderTimer)return;renderTimer=setTimeout(function(){renderTimer=null;render()},2000)}
+function probe(url){
+  var ac=new AbortController(),t=setTimeout(function(){ac.abort()},8000);
+  return fetch(url,{signal:ac.signal,cache:'no-store'}).then(function(r){
+    if(!r.ok)return 'bad';
+    if(/\.m3u8?($|\?)/i.test(url))return r.text().then(function(x){return x.indexOf('#EXTM3U')>=0?'ok':'bad'});
+    ac.abort();return 'ok';
+  }).catch(function(){
+    if(ac.signal.aborted)return 'bad';
+    var ac2=new AbortController(),t2=setTimeout(function(){ac2.abort()},6000);
+    return fetch(url,{mode:'no-cors',signal:ac2.signal,cache:'no-store'})
+      .then(function(){ac2.abort();return 'unk'},function(){return 'bad'})
+      .then(function(v){clearTimeout(t2);return v});
+  }).then(function(v){clearTimeout(t);return v});
+}
+function runCheck(){
+  var run=++checkRun,queue=channels.filter(function(c){return !(c.url in st)}).slice(0,1500),i=0,active=0;
+  checking=queue.length>0;
+  function next(){
+    if(run!==checkRun)return;
+    if(i>=queue.length){if(!active){checking=false;render()}return}
+    var c=queue[i++];active++;
+    probe(c.url).then(function(v){active--;if(st[c.url]!=='bad')st[c.url]=v;later();next()});
+  }
+  for(var k=0;k<8;k++)next();
+}
+
 function isFav(c){return favs.some(function(f){return f.url===c.url})}
 function toggleFav(c){
   if(isFav(c))favs=favs.filter(function(f){return f.url!==c.url});
@@ -239,13 +276,18 @@ function toggleFav(c){
 
 function filtered(){
   var src=tab==='fav'?favs:channels,term=q.value.trim().toLowerCase(),g=groupSel.value;
-  return src.filter(function(c){
-    return(!term||c.name.toLowerCase().indexOf(term)>=0)&&(tab==='fav'||!g||c.group===g);
+  var hide=$('hideBad').checked;
+  var r=src.filter(function(c){
+    return(!term||c.name.toLowerCase().indexOf(term)>=0)&&(tab==='fav'||!g||c.group===g)&&(!hide||st[c.url]!=='bad');
   });
+  if(tab==='fav')return r;
+  return r.map(function(c,i){return[c,i]}).sort(function(a,b){
+    return(st[b[0].url]==='ok')-(st[a[0].url]==='ok')||a[1]-b[1];
+  }).map(function(x){return x[0]});
 }
 
 function row(c){
-  var li=document.createElement('li');li.className='ch'+(current&&current.url===c.url?' on':'');
+  var li=document.createElement('li');li.className='ch'+(current&&current.url===c.url?' on':'')+(st[c.url]==='ok'?' ok':'');
   var b=document.createElement('button');b.className='play';b.type='button';
   var lg=document.createElement('span');lg.className='logo';
   if(c.logo){
@@ -266,7 +308,7 @@ function row(c){
 
 function render(){
   var items=filtered();
-  $('count').textContent=items.length+(items.length===1?' canal':' canales');
+  $('count').textContent=items.length+(items.length===1?' canal':' canales')+(checking&&tab==='all'?' · verificando…':'');
   if(!items.length){
     note(tab==='fav'?'Aún no tienes favoritos. Toca la estrella de un canal para guardarlo aquí.':(channels.length?'Ningún canal coincide con tu búsqueda.':'Esta lista no tiene canales.'));
     $('count').textContent='0 canales';return;
@@ -293,6 +335,7 @@ function stop(){
 }
 function fail(token){
   if(token!==playToken)return;
+  if(current){st[current.url]='bad';later()}
   stop();$('now').classList.remove('live');
   overlay('Este canal no responde','Puede estar fuera del aire o no permitir verse desde el navegador. Prueba con otro canal.');
 }
@@ -328,6 +371,7 @@ video.addEventListener('error',function(){if(current&&!hls)fail(playToken)});
 // Controles
 listSel.addEventListener('change',function(){q.value='';loadList(listSel.value)});
 groupSel.addEventListener('change',function(){shown=PAGE;listEl.scrollTop=0;render()});
+$('hideBad').addEventListener('change',function(){shown=PAGE;render()});
 q.addEventListener('input',function(){shown=PAGE;listEl.scrollTop=0;render()});
 function setTab(t){
   tab=t;shown=PAGE;listEl.scrollTop=0;
