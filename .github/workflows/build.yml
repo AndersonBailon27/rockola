@@ -2,7 +2,7 @@ name: Construir APK
 
 on:
   push:
-    branches: [ main ]
+    branches: [ mezcla-dj ]
   workflow_dispatch:
 
 permissions:
@@ -37,8 +37,8 @@ jobs:
       - name: Publicar descarga
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.0.${{ github.run_number }}
+          tag_name: mezcla-dj-v1.0.${{ github.run_number }}
           name: Mezcla DJ v1.0.${{ github.run_number }}
           body: ${{ github.event.head_commit.message }}
           files: MezclaDJ.apk
-          make_latest: true
+          make_latest: false
