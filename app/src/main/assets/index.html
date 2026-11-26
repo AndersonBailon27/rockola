@@ -109,11 +109,11 @@ li .act svg{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:2;
 <div class="opt"><span>Tipo de cambio</span><div class="seg" data-opt="style">
 <button class="btn" data-v="auto" aria-pressed="true">Automático</button><button class="btn" data-v="suave" aria-pressed="false">Cambio de bajos</button><button class="btn" data-v="filtro" aria-pressed="false">Filtro</button><button class="btn" data-v="eco" aria-pressed="false">Eco</button></div></div>
 <div class="opt"><span>Duración del cambio</span><div class="seg" data-opt="len">
-<button class="btn" data-v="8" aria-pressed="false">Corto</button><button class="btn" data-v="16" aria-pressed="true">Normal</button><button class="btn" data-v="32" aria-pressed="false">Largo</button></div></div>
+<button class="btn" data-v="16" aria-pressed="false">Corto</button><button class="btn" data-v="32" aria-pressed="true">Normal</button><button class="btn" data-v="64" aria-pressed="false">Largo</button></div></div>
 <div class="opt"><span>Cuánto suena cada canción</span><div class="seg" data-opt="dur">
 <button class="btn" data-v="0" aria-pressed="true">Completa</button><button class="btn" data-v="120" aria-pressed="false">2 min</button><button class="btn" data-v="60" aria-pressed="false">1 min</button></div></div>
 <div class="opt"><span>Lista</span><div class="seg"><button class="btn" id="sort">Ordenar por BPM</button><button class="btn" id="rep" aria-pressed="false">Repetir lista</button></div></div>
-<p class="note">Automático usa el cambio de bajos o el filtro cuando los BPM se parecen, y el eco cuando son muy distintos (por ejemplo, reguetón y salsa). Cuanto más parecido el ritmo, más limpio sale el cambio.</p>
+<p class="note">En cada cambio la intro de la siguiente canción entra despacio y sin bajos debajo de la que suena; a la mitad se intercambian los bajos y la anterior se va apagando. Normal dura unos 15 segundos y Largo unos 30. Si los BPM son muy distintos (por ejemplo, reguetón y salsa) la mezcla igual es gradual, pero los golpes no quedan cuadrados.</p>
 </section>
 </div>
 </div>
@@ -137,7 +137,7 @@ function mkDeck(id) {
   return d;
 }
 const A = mkDeck('A'), B = mkDeck('B');
-const S = { list: [], cur: null, running: false, pend: null, ramp: null, force: false, flip: false, style: 'auto', len: 16, dur: 0, rep: false, uid: 0 };
+const S = { list: [], cur: null, running: false, pend: null, ramp: null, force: false, flip: false, style: 'auto', len: 32, dur: 0, rep: false, uid: 0 };
 const $ = id => document.getElementById(id);
 const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const fmt = s => { s = Math.max(0, s || 0); return Math.floor(s / 60) + ':' + String(Math.floor(s % 60)).padStart(2, '0'); };
@@ -251,35 +251,48 @@ function mixOutPos(it, L) {
 }
 function transition(out, outPos) {
   const inn = other(out), itO = out.item, itI = nextItem(); if (!itI) return;
-  if (S.ramp && S.ramp.d === out) { S.ramp = null; }
+  if (S.ramp && S.ramp.d === out) S.ramp = null;
   const now = ctx.currentTime, T = out.t0 + (outPos - out.offset) / out.eff;
   const bpmNow = itO.bpm * out.eff;
   let r = [1, 2, 0.5].map(m => bpmNow / itI.bpm * m).sort((x, y) => Math.abs(x - 1) - Math.abs(y - 1))[0];
-  const match = Math.abs(r - 1) <= 0.08;
-  let style = S.style === 'auto' ? (match ? ((S.flip = !S.flip) ? 'suave' : 'filtro') : 'eco') : S.style;
+  const match = Math.abs(r - 1) <= 0.12;
+  const style = S.style === 'auto' ? (match ? ((S.flip = !S.flip) ? 'suave' : 'filtro') : 'suave') : S.style;
   if (!match) r = 1;
-  const beat = 60 / bpmNow, D = (style === 'eco' ? 4 : S.len) * beat;
+  const beat = 60 / bpmNow, D = (style === 'eco' ? Math.min(S.len, 16) : S.len) * beat, h = T + D / 2;
   reset(inn, now);
+  const N = 256, cin = new Float32Array(N), cout = new Float32Array(N), sm = x => x * x * (3 - 2 * x);
+  for (let i = 0; i < N; i++) {
+    const x = i / (N - 1);
+    if (style === 'suave') {
+      cin[i] = x < 0.25 ? 0.55 * sm(x / 0.25) : x < 0.5 ? 0.55 + 0.3 * sm((x - 0.25) / 0.25) : 0.85 + 0.15 * sm((x - 0.5) / 0.5);
+      cout[i] = x < 0.5 ? 1 : Math.cos((x - 0.5) / 0.5 * Math.PI / 2);
+    } else if (style === 'filtro') {
+      cin[i] = x < 0.6 ? Math.sin(x / 0.6 * Math.PI / 2) : 1;
+      cout[i] = x < 0.4 ? 1 : Math.cos((x - 0.4) / 0.6 * Math.PI / 2);
+    } else {
+      cin[i] = sm(x);
+      cout[i] = x < 0.85 ? 1 : Math.max(0, 1 - (x - 0.85) / 0.15);
+    }
+  }
+  cout[N - 1] = 0;
+  inn.fade.gain.setValueAtTime(0, now); inn.fade.gain.setValueCurveAtTime(cin, T, D);
+  out.fade.gain.cancelScheduledValues(now); out.fade.gain.setValueAtTime(1, now); out.fade.gain.setValueCurveAtTime(cout, T, D);
+  // intercambio de bajos: la nueva entra sin bajos y a la mitad se los quita a la anterior
+  inn.low.gain.setValueAtTime(-30, now); inn.low.gain.setValueAtTime(-30, h); inn.low.gain.linearRampToValueAtTime(0, h + 2 * beat);
+  out.low.gain.setValueAtTime(0, h); out.low.gain.linearRampToValueAtTime(-30, h + 2 * beat);
+  out.high.gain.setValueAtTime(0, T); out.high.gain.linearRampToValueAtTime(-8, T + D);
+  if (style === 'filtro') {
+    out.filt.type = 'highpass'; out.filt.frequency.setValueAtTime(20, now); out.filt.frequency.setValueAtTime(20, T); out.filt.frequency.exponentialRampToValueAtTime(2000, T + D);
+    inn.filt.frequency.setValueAtTime(250, now); inn.filt.frequency.setValueAtTime(250, T); inn.filt.frequency.exponentialRampToValueAtTime(20000, T + D * 0.8);
+  } else {
+    out.filt.type = 'highpass'; out.filt.frequency.setValueAtTime(20, now); out.filt.frequency.setValueAtTime(20, h); out.filt.frequency.exponentialRampToValueAtTime(350, T + D);
+    if (!match || style === 'eco') { inn.filt.frequency.setValueAtTime(600, now); inn.filt.frequency.setValueAtTime(600, T); inn.filt.frequency.exponentialRampToValueAtTime(20000, h); }
+  }
   if (style === 'eco') {
     dl.delayTime.setValueAtTime(Math.min(1.9, beat * 0.75), now);
-    out.send.gain.setValueAtTime(0, T); out.send.gain.linearRampToValueAtTime(0.9, T + D); out.send.gain.setValueAtTime(0, T + D + 0.01);
-    out.fade.gain.setValueAtTime(1, T + D - 0.03); out.fade.gain.linearRampToValueAtTime(0, T + D);
-    startDeck(inn, itI, T + D, itI.mixIn, r);
-  } else if (style === 'suave') {
-    const h = T + D / 2;
-    inn.fade.gain.setValueAtTime(0, now); inn.fade.gain.setValueCurveAtTime(curve(true), T, D / 2);
-    inn.low.gain.setValueAtTime(-30, now); inn.low.gain.setValueAtTime(-30, h); inn.low.gain.linearRampToValueAtTime(0, h + beat / 2);
-    out.low.gain.setValueAtTime(0, h); out.low.gain.linearRampToValueAtTime(-30, h + beat / 2);
-    out.high.gain.setValueAtTime(0, T); out.high.gain.linearRampToValueAtTime(-10, T + D);
-    out.fade.gain.setValueAtTime(1, h); out.fade.gain.setValueCurveAtTime(curve(false), h + 0.001, D / 2);
-    startDeck(inn, itI, T, itI.mixIn, r);
-  } else {
-    out.filt.type = 'highpass'; out.filt.frequency.setValueAtTime(20, now); out.filt.frequency.setValueAtTime(20, T); out.filt.frequency.exponentialRampToValueAtTime(1800, T + D);
-    out.fade.gain.setValueAtTime(1, T + D / 2); out.fade.gain.setValueCurveAtTime(curve(false), T + D / 2 + 0.001, D / 2);
-    inn.filt.frequency.setValueAtTime(220, now); inn.filt.frequency.setValueAtTime(220, T); inn.filt.frequency.exponentialRampToValueAtTime(20000, T + D * 0.85);
-    inn.fade.gain.setValueAtTime(0, now); inn.fade.gain.setValueCurveAtTime(curve(true), T, D / 2);
-    startDeck(inn, itI, T, itI.mixIn, r);
+    out.send.gain.setValueAtTime(0, T + D * 0.6); out.send.gain.linearRampToValueAtTime(0.9, T + D); out.send.gain.setValueAtTime(0, T + D + 0.01);
   }
+  startDeck(inn, itI, T, itI.mixIn, r);
   S.pend = { out, inn, T, endAt: T + D + 0.1, r, beat, style, name: itI.name, match };
   labels(); render();
 }
@@ -288,7 +301,7 @@ function tick() {
   const now = ctx.currentTime;
   if (S.pend) {
     const p = S.pend;
-    if (now >= p.T) status(`Mezclando con ${p.name} · ${STY[p.style]}${p.match ? '' : ' (ritmos muy distintos)'}`);
+    if (now >= p.T) status(`Mezclando con ${p.name} · ${STY[p.style]} · ${Math.min(100, Math.round((now - p.T) / (p.endAt - p.T) * 100))}%${p.match ? '' : ' · ritmos distintos, sin cuadrar golpes'}`);
     else status(`Preparando el cambio a ${p.name}…`);
     if (now >= p.endAt) {
       kill(p.out, now); p.out.src = null; S.cur = p.inn; S.pend = null;
