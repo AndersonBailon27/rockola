@@ -1,0 +1,44 @@
+name: Construir APK
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Compilar APK
+        run: gradle assembleRelease --no-daemon --stacktrace
+
+      - name: Preparar archivo
+        run: cp app/build/outputs/apk/release/app-release.apk MezclaDJ.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MezclaDJ-apk
+          path: MezclaDJ.apk
+
+      - name: Publicar descarga
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.${{ github.run_number }}
+          name: Mezcla DJ v1.0.${{ github.run_number }}
+          body: ${{ github.event.head_commit.message }}
+          files: MezclaDJ.apk
+          make_latest: true
